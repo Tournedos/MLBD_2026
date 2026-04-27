@@ -78,3 +78,13 @@ def long_word_ratio(text, min_len=7):
     if len(words) == 0:
         return 0.0
     return sum(len(w) >= min_len for w in words) / len(words)
+
+def clean_german_essay_text(text):
+    if pd.isna(text):
+        return ""
+    text = str(text).lower()
+    text = re.sub(r"[\n\r\t]+", " ", text) # replace the newlines / tabs by spaces
+    text = re.sub(r"\d+", " ", text) # take out the numbers
+    text = re.sub(r"[^a-zA-ZäöüÄÖÜß\s]", " ", text) #  keep german words + spaces
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
