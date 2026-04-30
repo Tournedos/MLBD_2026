@@ -1,2 +1,6 @@
 data/
 MLBD/
+__pycache__/
+anaconda_projects/
+envs/
+venv/
