@@ -8,7 +8,7 @@ This project investigates which observable student behaviors in : *written respo
 
 --- 
 
-**Main research question:** Which observable student behaviors, including written response quality, chatbot interaction patterns, and early platform engagement, are most predictive of academic success?
+**Main research question:** How do the linguistic and semantic characteristics of students' written responses relate to their performance across essay (and text) comprehension assessments?
 
 - **Sub-question 1:** How do the linguistic and semantic characteristics of students' written responses relate to their performance across essay and text comprehension assessments?
 
