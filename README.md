@@ -1,12 +1,14 @@
 # CS-421 Machine learning for behavioral data
+
 ## Project - GoGymi dataset
-### **Authors:** Fatumah binta Doukouré 340969 - Louis Tschanz 315774 - Majandra Garcia 347470
+
+### *Authors:* Fatumah binta Doukouré 340969 - Louis Tschanz 315774 - Majandra Garcia 347470
 
 ---
 
 This project investigates which observable student behaviors in : *written response quality, AI chatbot interaction patterns, and early platform engagement*, are most predictive of academic success, using data from GoGymi, a Swiss e-learning platform for secondary-school students.
 
---- 
+---
 
 **Main research question:** How do the linguistic and semantic characteristics of students' written responses relate to their performance across essay (and text) comprehension assessments?
 
@@ -73,7 +75,7 @@ jupyter notebook `Q3/3_subquestion.ipynb`
 
 ## Project structure
 
-```
+```bash
 MLBD_2026/
 ├── Q1/
 │   ├── figures_q1/          # Output figures for sub-question 1
