@@ -78,7 +78,11 @@ jupyter notebook `Q3/3_subquestion.ipynb`
 ```bash
 MLBD_2026/
 ├── Q1/
-│   ├── figures_q1/          # Output figures for sub-question 1
+│   ├── part1_mlp_training_loss.png
+│   ├── part1_oof_diagnostics.png
+│   ├── part1_rf_feature_importances.png
+│   ├── part2_top_tfidf_features_ridge.png
+│   ├── part3_model_comparison_cv.png
 │   ├── 1_subquestion.ipynb  # Notebook for sub-question 1
 │   └── helpers.py           # Helper functions for Q1
 ├── Q2/
