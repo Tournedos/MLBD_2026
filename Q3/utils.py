@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import seaborn as sns
  
-from sklearn.model_selection import StratifiedKFold, cross_validate
+from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
@@ -22,7 +22,11 @@ from sklearn.metrics import (
 )
 from sklearn.impute import SimpleImputer
 from sklearn.inspection import permutation_importance
- 
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Bidirectional, Dense, Dropout
+from tensorflow.keras.optimizers import Adam
+
+
 try:
     from xgboost import XGBClassifier
     HAS_XGB = True
@@ -105,10 +109,16 @@ def load_data(data_dir):
     tables = {}
 
     for name in required:
+        print(f"Reading Table {name}")
         path = p/f"{name}.csv"
         df = pd.read_csv(path, low_memory = False)
         tables[name] = df
 
+    return tables
+
+def load_event_data(data_dir):
+    p = Path(data_dir)
+    tables = {}
     # Load event tables
     event_dir = p/"events"
     event_tables = {}
@@ -116,11 +126,13 @@ def load_data(data_dir):
 
 
     for name in required:
+        print(f"Reading Table {name}")
         path = event_dir/f"{name}.csv"
         df = pd.read_csv(path, low_memory = False)
         event_tables[name] = df
+        del(df)
 
-    return tables, event_tables
+    return event_tables
 
 def _to_unix(series: pd.Series) -> pd.Series:
     out = pd.to_numeric(series, errors="coerce")
@@ -324,10 +336,22 @@ def _features_questions(df, course_ids):
     # We flag rows that are part of a duplicate (user_id, url, q_num) set
     df["is_revisit"] = df.duplicated(subset=["user_id", "url", "q_num"], keep=False)
 
+    # 0 if majority of course_id are in kurzeit_id, else 1
+    
+    def _maj_track_binary(x):
+        kurzeit_ids = [3865, 3301, 5009, 8117]
+        langzeit_ids = [42, 5447, 2115, 8117]
+        x = x.dropna()
+        if len(x) == 0:
+            return np.nan
+        in_set_ratio = x.isin(kurzeit_ids).mean()
+        return 0 if in_set_ratio > 0.5 else 1
+
     # 3. Main Aggregation
     res = df.groupby("user_id").agg(
         q__n_questions_viewed=("ts", "count"),
         q__n_unique_urls=("url", "nunique") if "url" in df.columns else ("ts", lambda _: np.nan),
+        q__maj_track=("course_id", _maj_track_binary),
         q__n_unique_courses=("course_id", "nunique"),
         q__avg_question_number=("q_num", "mean"),
         q__n_active_days=("ts", lambda x: pd.to_datetime(x, unit="s").dt.date.nunique()),
@@ -337,37 +361,58 @@ def _features_questions(df, course_ids):
 
     return res.reset_index()
 
-def extract_event_features_(event_tables, tables, early_ts):
-    df_pageview = tables['pageviews'].copy()
-    course_ids  = tables['course_ids']
+def extract_event_features_(data_dir, tables, early_ts):
+    """
+    Reads each event CSV one at a time: load → filter → extract features → delete.
+    Only one large event table lives in memory at once.
+    """
+    EVENT_COLS = {
+        "0": ["pageview_id", "timestamp", "lastActivity", "scrollY"],
+        "c": ["pageview_id", "timestamp", "scrollY"],
+        "m": ["pageview_id", "timestamp", "currentTime", "duration",
+              "eventType", "mediaType", "mediaId"],
+        "q": ["pageview_id", "timestamp", "questionNumber"],
+    }
 
-    def merge_pageview(event_df):
-        return event_df.merge(df_pageview, left_on="pageview_id", right_on="id")
+    pv         = tables['pageviews'][["id", "user_id", "url"]]
+    pid_to_uid = pv.set_index("id")["user_id"].to_dict()
+    pid_to_url = pv.set_index("id")["url"].to_dict()
+    course_ids = tables['course_ids']
+    event_dir  = Path(data_dir) / "events"
 
-    def apply_window(df, ts_col="timestamp"):
-        # Event timestamps are in ms → convert to seconds for comparison
-        # early_ts values are already in Unix seconds
-        event_ts_s = pd.to_numeric(df[ts_col], errors="coerce") / 1000
-        cutoff_s   = df["user_id"].map(early_ts)
-        return df[event_ts_s <= cutoff_s].copy()
+    def read_and_filter(name, chunk_size=500_000):
+        path      = event_dir / f"{name}.csv"
+        wanted    = EVENT_COLS.get(name, [])
+        available = pd.read_csv(path, nrows=0).columns.tolist()
+        usecols   = [c for c in wanted if c in available] or None
+        print(f"  Loading event/{name}.csv  cols={usecols}")
+        raw = pd.read_csv(path, usecols=usecols)#, low_memory=False)
 
-    df_clicks    = apply_window(merge_pageview(event_tables['c']))
-    df_heartbeat = apply_window(merge_pageview(event_tables['0']))
-    df_media     = apply_window(merge_pageview(event_tables['m']))
-    df_questions = apply_window(merge_pageview(event_tables['q']))
+        kept = []
+        for start in range(0, len(raw), chunk_size):
+            chunk = raw.iloc[start : start + chunk_size]
+            uid   = chunk["pageview_id"].map(pid_to_uid)
+            mask  = uid.notna()
+            if not mask.any():
+                continue
+            filt = chunk.loc[mask].copy()
+            filt["user_id"] = uid[mask].astype(int)
+            if "url" not in filt.columns:
+                filt["url"] = filt["pageview_id"].map(pid_to_url)
+            ts_s   = pd.to_numeric(filt["timestamp"], errors="coerce") / 1000
+            cutoff = filt["user_id"].map(early_ts)
+            kept.append(filt.loc[ts_s <= cutoff])
+        del raw  # free the full CSV before extracting features
+        return pd.concat(kept, ignore_index=True) if kept else pd.DataFrame()
 
-    feat_tables = [
-        _features_clicks(df_clicks),
-        _features_heartbeat(df_heartbeat),
-        _features_questions(df_questions, course_ids),
-        _features_media(df_media),
-    ]
+    feat_clicks    = _features_clicks(read_and_filter("c"))
+    feat_heartbeat = _features_heartbeat(read_and_filter("0"))
+    feat_questions = _features_questions(read_and_filter("q"), course_ids)
+    feat_media     = _features_media(read_and_filter("m"))
 
-    features = feat_tables[0]
-    for ft in feat_tables[1:]:
-        print(f"Length before merge: {len(features)}")
+    features = feat_clicks
+    for ft in [feat_heartbeat, feat_questions, feat_media]:
         features = features.merge(ft, on="user_id", how="outer")
-        print(f"Length after merge : {len(features)}")
 
     return features.reset_index()
 
@@ -437,7 +482,7 @@ def plot_feature_importance(results, X, outpath="feature_importance.png", top_n=
 
         axes[1, 1].barh(xgb_mean.index, xgb_mean.values, xerr=xgb_std.values,
                         color=C["primary"], ecolor="gray", capsize=3)
-        axes[1, 1].set_title("XGBoost ",
+        axes[1, 1].set_title("XGBoost",
                               color=C["dark"])
         axes[1, 1].set_xlabel("Importance")
     else:
@@ -574,3 +619,396 @@ def evaluate_models(X: pd.DataFrame, y: pd.Series, out_dir: Path) -> dict:
     _plot_roc_curves(results, X, y, cv, out_dir)
  
     return results
+
+
+# MLP implementation
+import torch
+from sklearn.metrics import f1_score, balanced_accuracy_score
+
+class MLP:
+    def __init__(self, input_size, hidden_size, output_size):
+        std1 = math.sqrt(2.0 / input_size)
+        std2 = math.sqrt(2.0 / hidden_size)
+        self.W1 = (torch.randn(input_size, hidden_size) * std1).requires_grad_(True)
+        self.b1 = torch.zeros(1, hidden_size, requires_grad=True)
+        self.W2 = (torch.randn(hidden_size, output_size) * std2).requires_grad_(True)
+        self.b2 = torch.zeros(1, output_size, requires_grad=True)
+
+    def parameters(self):
+        return [self.W1, self.b1, self.W2, self.b2]
+
+    def forward(self, x):
+        self.z1 = torch.matmul(x, self.W1) + self.b1
+        self.a1 = torch.relu(self.z1)           # ReLU hidden activation
+        self.z2 = torch.matmul(self.a1, self.W2) + self.b2
+        self.a2 = torch.sigmoid(self.z2)        # Sigmoid output for binary classification
+        return self.a2
+
+    def train_loop(self, X_train, y_train, lr=1e-3, n_epochs=300, batch_size=64):
+        optimizer = torch.optim.Adam(self.parameters(), lr=lr, weight_decay=1e-4)
+        loss_fn   = torch.nn.BCELoss()
+        n         = X_train.shape[0]
+
+        for _ in range(n_epochs):
+            # Mini-batch SGD
+            perm = torch.randperm(n)
+            for start in range(0, n, batch_size):
+                idx     = perm[start : start + batch_size]
+                X_batch = X_train[idx]
+                y_batch = y_train[idx]
+
+                optimizer.zero_grad()
+                y_pred = self.forward(X_batch).squeeze()
+                loss   = loss_fn(y_pred, y_batch)
+                loss.backward()
+                optimizer.step()
+
+    def predict_proba(self, X_tensor):
+        with torch.no_grad():
+            return self.forward(X_tensor).squeeze().numpy()
+
+
+def evaluate_mlp(X: pd.DataFrame, y: pd.Series,
+                 hidden_size: int = 64, lr: float = 1e-3, n_epochs: int = 300) -> dict:
+    """Cross-validated evaluation of MLP; returns metrics dict matching evaluate_models format."""
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+    aucs, f1s, bal_accs = [], [], []
+
+    for train_idx, test_idx in cv.split(X, y):
+        X_tr, X_te = X.iloc[train_idx].values, X.iloc[test_idx].values
+        y_tr, y_te = y.iloc[train_idx].values, y.iloc[test_idx].values
+
+        # Impute then scale (same preprocessing as sklearn pipelines)
+        imputer = SimpleImputer(strategy="median")
+        scaler  = StandardScaler()
+        X_tr = scaler.fit_transform(imputer.fit_transform(X_tr))
+        X_te = scaler.transform(imputer.transform(X_te))
+
+        X_tr_t = torch.tensor(X_tr, dtype=torch.float32)
+        y_tr_t = torch.tensor(y_tr, dtype=torch.float32)
+        X_te_t = torch.tensor(X_te, dtype=torch.float32)
+
+        mlp = MLP(X_tr.shape[1], hidden_size, 1)
+        mlp.train_loop(X_tr_t, y_tr_t, lr=lr, n_epochs=n_epochs)
+
+        probs = mlp.predict_proba(X_te_t)
+        preds = (probs >= 0.5).astype(int)
+
+        aucs.append(roc_auc_score(y_te, probs))
+        f1s.append(f1_score(y_te, preds))
+        bal_accs.append(balanced_accuracy_score(y_te, preds))
+
+    roc_mean, roc_std = float(np.mean(aucs)), float(np.std(aucs))
+    f1_mean           = float(np.mean(f1s))
+    bal_mean          = float(np.mean(bal_accs))
+
+    print("\n── MLP (PyTorch) Cross-validated performance ─────────────")
+    print(f"  {'Model':<25} {'ROC-AUC':>9} {'F1':>9} {'Balanced Acc':>13}")
+    print("  " + "-" * 60)
+    #print(f"  {'MLP':<25} {roc_mean:.3f}±{roc_std:.3f}  {f1_mean:.3f}  {bal_mean:.3f}")
+
+    return {"roc_auc": roc_mean, "roc_auc_std": roc_std, "f1": f1_mean, "bal_acc": bal_mean}
+
+
+# ── Feature Groups ─────────────────────────────────────────────────────────
+EVENT_FEATURE_GROUPS = {
+    "Engagement Volume": [
+        "clicks__n_total", "heartbeat__n_total", "q__n_questions_viewed",
+        "media__n_play_events", "media__total_watch_min",
+    ],
+    "Content Breadth": [
+        "q__n_unique_urls", "q__n_unique_courses", "media__n_unique_urls",
+        "media__n_unique_media", "media__media_type_diversity",
+        "unique_math_qids", "unique_text_qids", "unique_quiz_qids",
+    ],
+    "Session Regularity": [
+        "clicks__session_gap_cv", "heartbeat__avg_idle_time", "q__n_active_days",
+    ],
+    "Scroll Depth": [
+        "clicks__avg_scrollY", "clicks__scroll_depth_max",
+        "heartbeat__avg_scrollY", "heartbeat__scroll_depth_max",
+    ],
+    "Learning Strategy": [
+        "content_entropy", "q__avg_question_number", "q__revisit_rate",
+        "q__maj_track", "media__audio_pct", "media__completion_rate",
+    ],
+}
+
+TS_FEATURE_COLS = [
+    "ts__q_bin1", "ts__q_bin2", "ts__q_bin3",
+    "ts__q_trend", "ts__q_recency",
+    "ts__pv_bin1", "ts__pv_bin2", "ts__pv_bin3",
+    "ts__pv_trend", "ts__pv_recency",
+    "ts__score_first", "ts__score_last", "ts__score_delta",
+]
+
+
+def build_time_series_features(data_dir, tables, early_ts, n_bins=3):
+    """
+    Per-user temporal bin features over the 41-day early window.
+    Bins question events and pageviews into n_bins equal slices;
+    adds quiz score trajectory (first half vs second half of window).
+    Returns a DataFrame with ts__* columns, one row per user.
+    """
+    WINDOW_S  = 41 * 86400 # 41 days window to seconds
+    bin_width = WINDOW_S / n_bins
+    valid_ts  = {u: t for u, t in early_ts.items() if pd.notna(t)}
+
+    # ── 1. Question-event bins (events/q.csv — timestamps in ms) ──────────
+    pv_map = tables["pageviews"][["id", "user_id"]].set_index("id")["user_id"].to_dict()
+    q_path = Path(data_dir) / "events" / "q.csv"
+    q_raw  = pd.read_csv(q_path, usecols=["pageview_id", "timestamp"])
+    q_raw["user_id"] = q_raw["pageview_id"].map(pv_map)
+    q_raw  = q_raw.dropna(subset=["user_id"])
+    q_raw["user_id"] = q_raw["user_id"].astype(int)
+    q_raw["ts"]      = pd.to_numeric(q_raw["timestamp"], errors="coerce") / 1000
+    q_raw["cutoff"]  = q_raw["user_id"].map(valid_ts)
+    q_raw["start"]   = q_raw["cutoff"] - WINDOW_S
+    q_raw = q_raw.dropna(subset=["cutoff"])
+    q_raw = q_raw[(q_raw["ts"] >= q_raw["start"]) & (q_raw["ts"] <= q_raw["cutoff"])]
+    q_raw["bin"] = ((q_raw["ts"] - q_raw["start"]) / bin_width).clip(0, n_bins - 1e-9).astype(int)
+
+    q_bins = (q_raw.groupby(["user_id", "bin"]).size()
+                   .unstack(fill_value=0)
+                   .reindex(columns=range(n_bins), fill_value=0))
+    q_bins.columns = [f"ts__q_bin{b+1}" for b in range(n_bins)]
+    q_bins["ts__q_trend"]   = q_bins[f"ts__q_bin{n_bins}"] - q_bins["ts__q_bin1"]
+    total_q = q_bins[[f"ts__q_bin{b+1}" for b in range(n_bins)]].sum(axis=1).replace(0, np.nan)
+    q_bins["ts__q_recency"] = q_bins[f"ts__q_bin{n_bins}"] / total_q
+
+    # ── 2. Pageview bins (created_at may be datetime or string) ───────────
+    pv = tables["pageviews"][["user_id", "created_at"]].copy()
+    if pd.api.types.is_datetime64_any_dtype(pv["created_at"]):
+        pv["ts"] = pv["created_at"].apply(lambda x: x.timestamp() if pd.notna(x) else np.nan)
+    else:
+        pv["ts"] = _to_unix(pv["created_at"])
+    pv["cutoff"] = pv["user_id"].map(valid_ts)
+    pv["start"]  = pv["cutoff"] - WINDOW_S
+    pv = pv.dropna(subset=["cutoff"])
+    pv = pv[(pv["ts"] >= pv["start"]) & (pv["ts"] <= pv["cutoff"])]
+    pv["bin"] = ((pv["ts"] - pv["start"]) / bin_width).clip(0, n_bins - 1e-9).astype(int)
+
+    pv_bins = (pv.groupby(["user_id", "bin"]).size()
+                 .unstack(fill_value=0)
+                 .reindex(columns=range(n_bins), fill_value=0))
+    pv_bins.columns = [f"ts__pv_bin{b+1}" for b in range(n_bins)]
+    pv_bins["ts__pv_trend"]   = pv_bins[f"ts__pv_bin{n_bins}"] - pv_bins["ts__pv_bin1"]
+    total_pv = pv_bins[[f"ts__pv_bin{b+1}" for b in range(n_bins)]].sum(axis=1).replace(0, np.nan)
+    pv_bins["ts__pv_recency"] = pv_bins[f"ts__pv_bin{n_bins}"] / total_pv
+
+    # ── 3. Quiz score trajectory ───────────────────────────────────────────
+    quiz = tables["quiz_results"].copy()
+    if pd.api.types.is_datetime64_any_dtype(quiz["time"]):
+        quiz["ts"] = quiz["time"].apply(lambda x: x.timestamp() if pd.notna(x) else np.nan)
+    else:
+        quiz["ts"] = _to_unix(quiz["time"])
+    quiz["cutoff"] = quiz["user_id"].map(valid_ts)
+    quiz["start"]  = quiz["cutoff"] - WINDOW_S
+    quiz = quiz.dropna(subset=["cutoff"])
+    quiz = quiz[(quiz["ts"] >= quiz["start"]) & (quiz["ts"] <= quiz["cutoff"])]
+    quiz["score"] = (pd.to_numeric(quiz["points"], errors="coerce") /
+                     pd.to_numeric(quiz["max_points"], errors="coerce").replace(0, np.nan))
+    quiz["first_half"] = quiz["ts"] < (quiz["start"] + WINDOW_S / 2)
+
+    s_first  = quiz[quiz["first_half"]].groupby("user_id")["score"].mean().rename("ts__score_first")
+    s_last   = quiz[~quiz["first_half"]].groupby("user_id")["score"].mean().rename("ts__score_last")
+    score_df = pd.concat([s_first, s_last], axis=1).reset_index()
+    score_df["ts__score_delta"] = score_df["ts__score_last"] - score_df["ts__score_first"]
+
+    # ── 4. Merge all ───────────────────────────────────────────────────────
+    result = q_bins.reset_index().merge(pv_bins.reset_index(), on="user_id", how="outer")
+    result = result.merge(score_df, on="user_id", how="outer")
+    print(f"  Time-series features: {result.shape[1]-1} features for {len(result)} users")
+    return result
+
+
+def plot_group_correlations(df, feature_groups, out_path="group_correlations.png"):
+    """Correlation heatmap for each feature group, plotted side by side."""
+    groups_avail = {
+        name: [c for c in cols if c in df.columns]
+        for name, cols in feature_groups.items()
+        if sum(c in df.columns for c in cols) >= 2
+    }
+    n   = len(groups_avail)
+    fig = plt.figure(figsize=(5 * n, 4.5), facecolor=C["bg"])
+    fig.suptitle("Within-group Feature Correlations",
+                 fontsize=13, fontweight="bold", color=C["dark"])
+
+    for i, (name, cols) in enumerate(groups_avail.items(), 1):
+        ax  = fig.add_subplot(1, n, i)
+        sub = df[cols].fillna(0)
+        sub = sub.loc[:, sub.std() > 0]  # drop zero-variance columns
+        corr   = sub.corr()
+        labels = [c.split("__")[-1] for c in sub.columns]
+        sns.heatmap(corr, ax=ax, annot=True, fmt=".2f", cmap="coolwarm",
+                    center=0, vmin=-1, vmax=1,
+                    xticklabels=labels, yticklabels=labels,
+                    annot_kws={"size": 7}, linewidths=0.4,
+                    cbar_kws={"shrink": 0.7})
+        ax.set_title(name, fontsize=10, fontweight="bold", color=C["dark"])
+        ax.tick_params(labelsize=7)
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+        plt.setp(ax.get_yticklabels(), rotation=0)
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=C["bg"])
+    plt.show()
+
+def plot_correlation_heatmap(df_final, group_cols, group_name):
+    print(group_name)
+    sub = df_final[group_cols]
+    sub = sub.loc[:, sub.std()>0]
+    corr_matrix = sub.corr()
+    plt.figure(figsize=(8,6))
+    sns.heatmap(corr_matrix, annot=True, cmap="coolwarm", fmt=".2f", linewidths=0.5)
+    plt.title(f"Correlation Heatmap for {group_name}")
+    plt.savefig(f"Correlation_Matrices/Correlation matrix for {group_name}")
+
+def evaluate_by_group(df, feature_groups, label_col="label",
+                      out_path="group_ablation.png"):
+    """
+    Ablation study: train RandomForest on each feature group separately,
+    then on all groups combined. Uses the same model throughout for fair comparison.
+    """
+    y  = df[label_col].astype(int)
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+    def _run(cols):
+        available = [c for c in cols if c in df.columns]
+        if not available:
+            return None
+        pipe = Pipeline([
+            ("impute", SimpleImputer(strategy="median")),
+            ("scale",  StandardScaler()),
+            ("clf",    RandomForestClassifier(
+                n_estimators=200, max_depth=6, min_samples_leaf=5,
+                class_weight="balanced", random_state=42, n_jobs=1)),
+        ])
+        cv_res = cross_validate(pipe, df[available], y, cv=cv,
+                                scoring=["roc_auc", "f1", "balanced_accuracy"],
+                                n_jobs=1)
+        return {
+            "roc_auc":     cv_res["test_roc_auc"].mean(),
+            "roc_auc_std": cv_res["test_roc_auc"].std(),
+            "f1":          cv_res["test_f1"].mean(),
+            "bal_acc":     cv_res["test_balanced_accuracy"].mean(),
+            "n_features":  len(available),
+        }
+
+    results = {}
+    for name, cols in feature_groups.items():
+        print(f"  [{name}]...", end=" ", flush=True)
+        res = _run(cols)
+        if res:
+            results[name] = res
+            print(f"AUC={res['roc_auc']:.3f}")
+
+    all_cols = [c for cols in feature_groups.values() for c in cols]
+    print(f"  [All Combined]...", end=" ", flush=True)
+    results["All Combined"] = _run(all_cols)
+    print(f"AUC={results['All Combined']['roc_auc']:.3f}")
+
+    # ── Print table ───────────────────────────────────────────────────────
+    print("\n── Group Ablation Study ─────────────────────────────────────")
+    print(f"  {'Group':<22} {'N':>4}  {'ROC-AUC':>12}  {'F1':>6}  {'Bal Acc':>8}")
+    print("  " + "─" * 60)
+    for name, res in results.items():
+        if res:
+            print(f"  {name:<22} {res['n_features']:>4}  "
+                  f"{res['roc_auc']:.3f}±{res['roc_auc_std']:.3f}  "
+                  f"{res['f1']:.3f}  {res['bal_acc']:.3f}")
+
+    # ── Plot ──────────────────────────────────────────────────────────────
+    names  = [n for n, r in results.items() if r]
+    aucs   = [results[n]["roc_auc"]     for n in names]
+    stds   = [results[n]["roc_auc_std"] for n in names]
+    colors = [C["secondary"] if n == "All Combined" else C["primary"] for n in names]
+
+    fig, ax = plt.subplots(figsize=(9, 5), facecolor=C["bg"])
+    bars = ax.barh(names, aucs, xerr=stds, color=colors,
+                   ecolor="gray", capsize=4, height=0.55, edgecolor="white")
+    ax.axvline(0.5, color="gray", linestyle="--", linewidth=0.8, label="Random baseline")
+    ax.set_xlim(0.4, 0.85)
+    ax.set_xlabel("ROC-AUC (5-fold CV)")
+    ax.set_title("Predictive Power by Feature Group",
+                 fontsize=13, fontweight="bold", color=C["dark"])
+    for bar, val in zip(bars, aucs):
+        ax.text(val + 0.005, bar.get_y() + bar.get_height() / 2,
+                f"{val:.3f}", va="center", fontsize=9)
+    ax.set_facecolor(C["bg"])
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=C["bg"])
+    plt.show()
+
+    return results
+
+
+def train_bidirectional_lstm(features_df: pd.DataFrame,
+                             labels_series: pd.Series,
+                             num_weeks: int = 10,
+                             test_size: float = 0.2,
+                             random_state: int = 42,
+                             lstm_units: int = 64,
+                             dense_units: int = 32,
+                             dropout_rate: float = 0.5,
+                             learning_rate: float = 1e-3,
+                             batch_size: int = 32,
+                             epochs: int = 10):
+
+    n_samples, n_features = features_df.shape
+    if n_features % num_weeks != 0:
+        raise ValueError(f"Expected total features to be divisible by num_weeks={num_weeks}, "
+                         f"but got {n_features} total features.")
+    n_metrics = n_features // num_weeks
+
+    X = features_df.values.reshape(n_samples, num_weeks, n_metrics)
+    y = labels_series.values
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, random_state=random_state, stratify=y
+    )
+
+    X_train_flat = X_train.reshape(-1, n_metrics)
+    X_test_flat  = X_test.reshape(-1,  n_metrics)
+
+    imputer = SimpleImputer(strategy="median")
+    X_train_flat = imputer.fit_transform(X_train_flat)
+    X_test_flat  = imputer.transform(X_test_flat)
+
+    scaler = StandardScaler()
+    X_train_flat = scaler.fit_transform(X_train_flat)
+    X_test_flat  = scaler.transform(X_test_flat)
+
+    X_train = X_train_flat.reshape(X_train.shape)
+    X_test  = X_test_flat.reshape(X_test.shape)
+
+    model = Sequential([
+        Bidirectional(
+            LSTM(lstm_units, return_sequences=False),
+            input_shape=(num_weeks, n_metrics)
+        ),
+        Dropout(dropout_rate),
+        Dense(dense_units, activation='relu'),
+        Dropout(dropout_rate),
+        Dense(1, activation='sigmoid')
+    ])
+
+    model.compile(
+        loss='binary_crossentropy',
+        optimizer=Adam(learning_rate=learning_rate),
+        metrics=['accuracy']
+    )
+
+    model.fit(
+        X_train, y_train,
+        validation_split=0.2,
+        epochs=epochs,
+        batch_size=batch_size,
+        verbose=1
+    )
+
+    loss, accuracy = model.evaluate(X_test, y_test, verbose=0)
+    print(f"Test Loss: {loss:.4f}, Test Accuracy: {accuracy:.4f}")
+
+    return model
