@@ -421,7 +421,7 @@ def extract_event_features_(data_dir, tables, early_ts):
 def plot_feature_importance(results, X, outpath="feature_importance.png", top_n=15):
 
     fig, axes = plt.subplots(2, 2, figsize=(20, 16), facecolor=C["bg"])
-
+    '''
     # ── Random Forest ──────────────────────────────────────────────────────
     rf_importances = np.array([
         est.named_steps["clf"].feature_importances_
@@ -437,7 +437,7 @@ def plot_feature_importance(results, X, outpath="feature_importance.png", top_n=
     axes[0, 0].set_title("Random Forest",
                           color=C["dark"])
     axes[0, 0].set_xlabel("Importance")
-
+    '''
     # ── Logistic Regression ────────────────────────────────────────────────
     lr_coefs = np.array([
         est.named_steps["clf"].coef_[0]
@@ -452,7 +452,7 @@ def plot_feature_importance(results, X, outpath="feature_importance.png", top_n=
     axes[0, 1].set_title("Logistic Regression — Coefficients (mean, 5 folds)\n"
                           "green = success, red = struggle", color=C["dark"])
     axes[0, 1].set_xlabel("Coefficient value")
-
+    
     # ── Gradient Boosting ──────────────────────────────────────────────────
     gb_importances = np.array([
         est.named_steps["clf"].feature_importances_
@@ -620,128 +620,6 @@ def evaluate_models(X: pd.DataFrame, y: pd.Series, out_dir: Path) -> dict:
  
     return results
 
-
-# MLP implementation
-import torch
-from sklearn.metrics import f1_score, balanced_accuracy_score
-
-class MLP:
-    def __init__(self, input_size, hidden_size, output_size):
-        std1 = math.sqrt(2.0 / input_size)
-        std2 = math.sqrt(2.0 / hidden_size)
-        self.W1 = (torch.randn(input_size, hidden_size) * std1).requires_grad_(True)
-        self.b1 = torch.zeros(1, hidden_size, requires_grad=True)
-        self.W2 = (torch.randn(hidden_size, output_size) * std2).requires_grad_(True)
-        self.b2 = torch.zeros(1, output_size, requires_grad=True)
-
-    def parameters(self):
-        return [self.W1, self.b1, self.W2, self.b2]
-
-    def forward(self, x):
-        self.z1 = torch.matmul(x, self.W1) + self.b1
-        self.a1 = torch.relu(self.z1)           # ReLU hidden activation
-        self.z2 = torch.matmul(self.a1, self.W2) + self.b2
-        self.a2 = torch.sigmoid(self.z2)        # Sigmoid output for binary classification
-        return self.a2
-
-    def train_loop(self, X_train, y_train, lr=1e-3, n_epochs=300, batch_size=64):
-        optimizer = torch.optim.Adam(self.parameters(), lr=lr, weight_decay=1e-4)
-        loss_fn   = torch.nn.BCELoss()
-        n         = X_train.shape[0]
-
-        for _ in range(n_epochs):
-            # Mini-batch SGD
-            perm = torch.randperm(n)
-            for start in range(0, n, batch_size):
-                idx     = perm[start : start + batch_size]
-                X_batch = X_train[idx]
-                y_batch = y_train[idx]
-
-                optimizer.zero_grad()
-                y_pred = self.forward(X_batch).squeeze()
-                loss   = loss_fn(y_pred, y_batch)
-                loss.backward()
-                optimizer.step()
-
-    def predict_proba(self, X_tensor):
-        with torch.no_grad():
-            return self.forward(X_tensor).squeeze().numpy()
-
-
-def evaluate_mlp(X: pd.DataFrame, y: pd.Series,
-                 hidden_size: int = 64, lr: float = 1e-3, n_epochs: int = 300) -> dict:
-    """Cross-validated evaluation of MLP; returns metrics dict matching evaluate_models format."""
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-
-    aucs, f1s, bal_accs = [], [], []
-
-    for train_idx, test_idx in cv.split(X, y):
-        X_tr, X_te = X.iloc[train_idx].values, X.iloc[test_idx].values
-        y_tr, y_te = y.iloc[train_idx].values, y.iloc[test_idx].values
-
-        # Impute then scale (same preprocessing as sklearn pipelines)
-        imputer = SimpleImputer(strategy="median")
-        scaler  = StandardScaler()
-        X_tr = scaler.fit_transform(imputer.fit_transform(X_tr))
-        X_te = scaler.transform(imputer.transform(X_te))
-
-        X_tr_t = torch.tensor(X_tr, dtype=torch.float32)
-        y_tr_t = torch.tensor(y_tr, dtype=torch.float32)
-        X_te_t = torch.tensor(X_te, dtype=torch.float32)
-
-        mlp = MLP(X_tr.shape[1], hidden_size, 1)
-        mlp.train_loop(X_tr_t, y_tr_t, lr=lr, n_epochs=n_epochs)
-
-        probs = mlp.predict_proba(X_te_t)
-        preds = (probs >= 0.5).astype(int)
-
-        aucs.append(roc_auc_score(y_te, probs))
-        f1s.append(f1_score(y_te, preds))
-        bal_accs.append(balanced_accuracy_score(y_te, preds))
-
-    roc_mean, roc_std = float(np.mean(aucs)), float(np.std(aucs))
-    f1_mean           = float(np.mean(f1s))
-    bal_mean          = float(np.mean(bal_accs))
-
-    print("\n── MLP (PyTorch) Cross-validated performance ─────────────")
-    print(f"  {'Model':<25} {'ROC-AUC':>9} {'F1':>9} {'Balanced Acc':>13}")
-    print("  " + "-" * 60)
-    #print(f"  {'MLP':<25} {roc_mean:.3f}±{roc_std:.3f}  {f1_mean:.3f}  {bal_mean:.3f}")
-
-    return {"roc_auc": roc_mean, "roc_auc_std": roc_std, "f1": f1_mean, "bal_acc": bal_mean}
-
-
-# ── Feature Groups ─────────────────────────────────────────────────────────
-EVENT_FEATURE_GROUPS = {
-    "Engagement Volume": [
-        "clicks__n_total", "heartbeat__n_total", "q__n_questions_viewed",
-        "media__n_play_events", "media__total_watch_min",
-    ],
-    "Content Breadth": [
-        "q__n_unique_urls", "q__n_unique_courses", "media__n_unique_urls",
-        "media__n_unique_media", "media__media_type_diversity",
-        "unique_math_qids", "unique_text_qids", "unique_quiz_qids",
-    ],
-    "Session Regularity": [
-        "clicks__session_gap_cv", "heartbeat__avg_idle_time", "q__n_active_days",
-    ],
-    "Scroll Depth": [
-        "clicks__avg_scrollY", "clicks__scroll_depth_max",
-        "heartbeat__avg_scrollY", "heartbeat__scroll_depth_max",
-    ],
-    "Learning Strategy": [
-        "content_entropy", "q__avg_question_number", "q__revisit_rate",
-        "q__maj_track", "media__audio_pct", "media__completion_rate",
-    ],
-}
-
-TS_FEATURE_COLS = [
-    "ts__q_bin1", "ts__q_bin2", "ts__q_bin3",
-    "ts__q_trend", "ts__q_recency",
-    "ts__pv_bin1", "ts__pv_bin2", "ts__pv_bin3",
-    "ts__pv_trend", "ts__pv_recency",
-    "ts__score_first", "ts__score_last", "ts__score_delta",
-]
 
 
 def build_time_series_features(data_dir, tables, early_ts, n_bins=3):
