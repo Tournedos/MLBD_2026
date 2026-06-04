@@ -12,7 +12,7 @@ This project investigates which observable student behaviors in : *written respo
 
 **Main research question:** How do the linguistic and semantic characteristics of students' written responses relate to their performance across essay (and text) comprehension assessments?
 
-- **Sub-question 1:** How do the linguistic and semantic characteristics of students' written responses relate to their performance across essay and text comprehension assessments?
+- **Sub-question 1:** How do the linguistic and semantic characteristics of students' written responses relate to their performance across essay assessment?
 
 - **Sub-question 2:** To what extent does chatbot (GymiTrainer) engagement, in terms of : frequency, interaction intensity, and feedback patterns, influence student performance in quizzes and essays?
 
@@ -71,6 +71,80 @@ jupyter notebook `Q2/2_subquestion.ipynb`
 
 jupyter notebook `Q3/3_subquestion.ipynb`
 
+### Overall fairness
+
+jupyter notebook Q4_OverallFairness/overall_fairness.ipynb
+
+This notebook explores fairness analyses across student subgroups (for example: gender, prior achievement bands, and activity levels). It reproduces the figures and computes fairness metrics used in our write-up, and documents mitigation experiments and subgroup diagnostics. The notebook uses the pre-extracted feature table [Q4_OverallFairness/q3_features.csv](Q4_OverallFairness/q3_features.csv).
+
+--
+
+**Run everything (exact steps)**
+
+1. Create and activate the virtual environment (see Installation).
+
+2. Provide the data folder path. Two options:
+
+- Set an environment variable (preferred for CI/headless runs):
+
+```bash
+export GOGYMI_DATA="/absolute/path/to/MLBD_2026/data"
+```
+
+- Or copy and edit the configuration template:
+
+```bash
+cp config_example.py config.py
+# then edit config.py and set DATA_DIR to the full path of the data folder
+```
+
+3. Run the notebooks in order (interactive):
+
+```bash
+jupyter notebook Q1/1_subquestion.ipynb
+jupyter notebook Q2/2_subquestion.ipynb
+jupyter notebook Q3/3_subquestion.ipynb
+jupyter notebook Q4_OverallFairness/overall_fairness.ipynb
+```
+
+4. (Optional) Run notebooks headlessly (execute and write outputs). Example using `nbconvert`:
+
+```bash
+jupyter nbconvert --to notebook --execute Q1/1_subquestion.ipynb --output executed_Q1.ipynb
+```
+
+--
+
+**Make paths configurable in code / notebooks**
+
+At the top of each notebook, add the following snippet to pick up the data path from the environment or from a local `config.py`:
+
+```python
+import os
+
+DATA_DIR = os.environ.get('GOGYMI_DATA')
+if DATA_DIR is None:
+	try:
+		from config import get_data_dir
+		DATA_DIR = get_data_dir()
+	except Exception:
+		raise RuntimeError('Set GOGYMI_DATA or create config.py from config_example.py')
+
+# usage example
+students_path = os.path.join(DATA_DIR, 'students.csv')
+```
+
+This avoids hardcoded paths and makes the notebooks reproducible across machines.
+
+**Data required**
+
+Place the following files under the directory referenced by `DATA_DIR` (the repository `data/` layout):
+
+- `events/` (0.csv, c.csv, g.csv, m.csv, q.csv, s.csv)
+- `comments.csv`, `course_ids.csv`, `essay_feedback.csv`, `essay_results.csv`, `gymitrainer.csv`, `gymitrainer_feedback.csv`, `math_questions.csv`, `math_results.csv`, `pageviews.csv`, `quiz_questions.csv`, `quiz_results.csv`, `students.csv`, `teachers.csv`, `text_questions.csv`, `text_results.csv`
+
+The notebook `Q4_OverallFairness/overall_fairness.ipynb` expects the feature table [Q4_OverallFairness/q3_features.csv](Q4_OverallFairness/q3_features.csv) to be present (it is included in the repository).
+
 ---
 
 ## Project structure
@@ -94,6 +168,9 @@ MLBD_2026/
 │   ├── PCA.jpg
 │   ├── 3_subquestion.ipynb  # Notebook for sub-question 3
 │   └── utils.py             # Utility functions for Q3
+├── Q4_OverallFairness/
+│   ├── overall_fairness.ipynb  # Notebook for overall fairness analyses
+│   └── q3_features.csv         # Feature table used in fairness analyses
 ├── data/                    # Raw data (not included in git, see Data section)
 │   ├── events/
 │   │   ├── 0.csv            # Heartbeat events
@@ -142,3 +219,4 @@ A full description of the datasets is included in `GoGymi_Data_Tables_Descriptio
 - **Sub-question 1 :** Louis Tschanz - Sciper: 315774
 - **Sub-question 2 :** Majandra Garcia - Sciper : 347470
 - **Sub-question 3 :** Fatumah binta Doukouré - Sciper : 340969
+- **Overall-fairness :** Fatumah binta Doukouré, Majandra Garcia and Louis Tschanz
