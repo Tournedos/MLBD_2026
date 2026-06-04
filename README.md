@@ -17,6 +17,8 @@ This project investigates which observable student behaviors in : *written respo
 - **Sub-question 2:** To what extent does chatbot (GymiTrainer) engagement, in terms of : frequency, interaction intensity, and feedback patterns, influence student performance in quizzes and essays?
 
 - **Sub-question 3:** To what extent can early learning behaviors, such as exercise diversity, session consistency, and content focus, predict which students will struggle or succeed later in their learning progression?
+  
+- **Fairness question:** Are the predictive models from RQ1-3 equitable across Langzeitgymnasium and Kurzzeitgymnasium students, two tracks that differ systematically in their socioeconomic composition and selection process?
 
 ---
 
@@ -73,7 +75,7 @@ jupyter notebook `Q3/3_subquestion.ipynb`
 
 ### Overall fairness
 
-jupyter notebook Q4_OverallFairness/overall_fairness.ipynb
+jupyter notebook `Q4_OverallFairness/overall_fairness.ipynb`
 
 This notebook explores fairness analyses across student subgroups (for example: gender, prior achievement bands, and activity levels). It reproduces the figures and computes fairness metrics used in our write-up, and documents mitigation experiments and subgroup diagnostics. The notebook uses the pre-extracted feature table [Q4_OverallFairness/q3_features.csv](Q4_OverallFairness/q3_features.csv).
 
@@ -195,7 +197,9 @@ MLBD_2026/
 │   ├── text_questions.csv
 │   └── text_results.csv
 ├── .gitignore
+├── config.py
 ├── GoGymi_Data_Tables_Description.pdf
+├── helpers.py
 ├── README.md
 └── requirements.txt
 ```
